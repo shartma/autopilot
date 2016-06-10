@@ -252,6 +252,26 @@ var _ = Describe("ApplicationRepo", func() {
 		It("returns errors from the stop", func() {
 			cliConn.CliCommandReturns([]string{}, errors.New("bad app"))
 
+			err := repo.StopApplication("app-name")
+			Expect(err).To(MatchError("bad app"))
+		})
+	})
+
+	Describe("StartApplication", func() {
+		It("starts a stopped application", func() {
+			err := repo.StartApplication("app-name")
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(cliConn.CliCommandCallCount()).To(Equal(1))
+			args := cliConn.CliCommandArgsForCall(0)
+			Expect(args).To(Equal([]string{
+				"start", "app-name",
+			}))
+		})
+
+		It("returns errors from the start", func() {
+			cliConn.CliCommandReturns([]string{}, errors.New("bad app"))
+
 			err := repo.DeleteApplication("app-name")
 			Expect(err).To(MatchError("bad app"))
 		})
