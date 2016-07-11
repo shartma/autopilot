@@ -29,6 +29,60 @@ func venerableAppName(appName string) string {
 	return fmt.Sprintf("%s-venerable", appName)
 }
 
+func rollbackAppName(appName string) string {
+	return fmt.Sprintf("%s-rollback", appName)
+}
+
+func getActionsForRollback(appName string, appRepo *ApplicationRepo, args []string) []rewind.Action {
+	return []rewind.Action{
+		//Rename live app
+		{
+			Forward: func() error {
+				return appRepo.RenameApplication(appName, rollbackAppName(appName))
+			},
+			ReversePrevious: func() error {
+				return appRepo.RenameApplication(rollbackAppName(appName), appName)
+			},
+		},
+		//Rename venerable app
+		{
+			Forward: func() error {
+				return appRepo.RenameApplication(venerableAppName(appName), appName)
+			},
+			ReversePrevious: func() error {
+				return appRepo.RenameApplication(appName, venerableAppName(appName))
+			},
+		},
+		//Start rollback app
+		{
+			Forward: func() error {
+				return appRepo.StartApplication(appName)
+
+			},
+		},
+		//Delete rolled back app
+		{
+			Forward: func() error {
+				return appRepo.DeleteApplication(rollbackAppName(appName))
+			},
+		},
+	}
+}
+
+func getActionsForPush(appRepo *ApplicationRepo, args []string) []rewind.Action {
+	appName, manifestPath, appPath, options, err := ParseArgs(args)
+	fatalIf(err)
+
+	appExists, err := appRepo.DoesAppExist(appName)
+	fatalIf(err)
+
+	if appExists {
+		return getActionsForExistingApp(appRepo, appName, manifestPath, appPath, options)
+	} else {
+		return getActionsForNewApp(appRepo, appName, manifestPath, appPath)
+	}
+}
+
 func getActionsForExistingApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, options AutopilotOptions) []rewind.Action {
 	return []rewind.Action{
 		// delete old version if it still exists
@@ -91,18 +145,29 @@ func getActionsForNewApp(appRepo *ApplicationRepo, appName, manifestPath, appPat
 
 func (plugin AutopilotPlugin) Run(cliConnection plugin.CliConnection, args []string) {
 	appRepo := NewApplicationRepo(cliConnection)
-	appName, manifestPath, appPath, options, err := ParseArgs(args)
-	fatalIf(err)
 
-	appExists, err := appRepo.DoesAppExist(appName)
-	fatalIf(err)
-
+	appName := args[1]
 	var actionList []rewind.Action
+	var	successMessage string
 
-	if appExists {
-		actionList = getActionsForExistingApp(appRepo, appName, manifestPath, appPath, options)
-	} else {
-		actionList = getActionsForNewApp(appRepo, appName, manifestPath, appPath)
+	if(args[0] == "zero-downtime-push") {
+		actionList = getActionsForPush(appRepo, args)
+		successMessage = "A new version of your application has successfully been pushed!"
+	} else if (args[0] == "zero-downtime-rollback") {
+		appExists, err := appRepo.DoesAppExist(appName)
+		fatalIf(err)
+		venerableAppExists, err := appRepo.DoesAppExist(venerableAppName(appName))
+		fatalIf(err)
+
+		if(!appExists){
+			fatalIf(errors.New(fmt.Sprintf("Live version of app \"%s\" not found, cannot rollback.", appName)))
+		}
+		if(!venerableAppExists){
+			fatalIf(errors.New(fmt.Sprintf("Venerable version of \"%s\" not found, cannot rollback. Make sure you push with the " +
+			"--keep-existing-app flag to leave the venerable version behind.", appName)))
+		}
+		actionList = getActionsForRollback(appName, appRepo, args)
+		successMessage = "Your application has been successfully rolled back!"
 	}
 
 	actions := rewind.Actions{
@@ -110,14 +175,11 @@ func (plugin AutopilotPlugin) Run(cliConnection plugin.CliConnection, args []str
 		RewindFailureMessage: "Oh no. Something's gone wrong. I've tried to roll back but you should check to see if everything is OK.",
 	}
 
-	err = actions.Execute()
+	err := actions.Execute()
 	fatalIf(err)
 
 	fmt.Println()
-	fmt.Println("A new version of your application has successfully been pushed!")
-	if(options.KeepExisting){
-		fmt.Println("The old version of your application has not been deleted. It can be restored by invoking cf zero-downtime-revert <appName>")
-	}
+	fmt.Println(successMessage)
 	fmt.Println()
 
 	err = appRepo.ListApplications()
@@ -138,6 +200,14 @@ func (AutopilotPlugin) GetMetadata() plugin.PluginMetadata {
 				HelpText: "Perform a zero-downtime push of an application over the top of an old one",
 				UsageDetails: plugin.Usage{
 					Usage: "$ cf zero-downtime-push application-to-replace \\ \n \t-f path/to/new_manifest.yml \\ \n \t-p path/to/new/path",
+				},
+			},
+			{
+				Name:"zero-downtime-rollback",
+				HelpText: "Perform a zero-downtime rollback to the previous version of the application. Requires that the previous, 'venerable' version of the app still exists." +
+					"Use the --keep-existing-app flag when performing a zero-downtime-push to ensure this.",
+				UsageDetails:plugin.Usage{
+					Usage:"$cf zero-downtime-rollback application-to-revert",
 				},
 			},
 		},
@@ -200,6 +270,11 @@ func (repo *ApplicationRepo) PushApplication(appName, manifestPath, appPath stri
 
 func (repo *ApplicationRepo) DeleteApplication(appName string) error {
 	_, err := repo.conn.CliCommand("delete", appName, "-f")
+	return err
+}
+
+func (repo *ApplicationRepo) StartApplication(appName string) error {
+	_, err := repo.conn.CliCommand("start", appName)
 	return err
 }
 
