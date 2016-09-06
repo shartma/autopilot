@@ -1,14 +1,15 @@
 {
 	"ImportPath": "github.com/concourse/autopilot",
 	"GoVersion": "go1.4.2",
+	"GodepVersion": "v74",
 	"Packages": [
 		"./..."
 	],
 	"Deps": [
 		{
 			"ImportPath": "github.com/cloudfoundry/cli/plugin",
-			"Comment": "v6.11.3-7-gd364b91",
-			"Rev": "d364b91144c3332057bc8c78199bfd09fde145d3"
+			"Comment": "v6.21.1-134-gacdd312",
+			"Rev": "acdd3126ab4142fdb44bf7628275aec64dcc139c"
 		},
 		{
 			"ImportPath": "github.com/onsi/ginkgo",

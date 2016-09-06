@@ -25,6 +25,11 @@ func main() {
 
 type AutopilotPlugin struct{}
 
+type Route struct {
+	Host []string
+	Domain string
+}
+
 func venerableAppName(appName string) string {
 	return fmt.Sprintf("%s-venerable", appName)
 }
@@ -33,6 +38,11 @@ func rollbackAppName(appName string) string {
 	return fmt.Sprintf("%s-rollback", appName)
 }
 
+//Check to see if venerable app has routes. if it does not, go get the routes for the current app, and put them on the
+//venerable.
+
+//If the rollback has no routes, it is going to receive the routes of the most recent version of the app regardless of
+//what the original unmapped venerable had for routes.
 func getActionsForRollback(appName string, appRepo *ApplicationRepo, args []string) []rewind.Action {
 	return []rewind.Action{
 		//Rename live app
@@ -44,12 +54,57 @@ func getActionsForRollback(appName string, appRepo *ApplicationRepo, args []stri
 				return appRepo.RenameApplication(rollbackAppName(appName), appName)
 			},
 		},
+
+		//See if venerable app has routes
+		{
+			Forward: func() error {
+				route, _ := appRepo.FindUrls(venerableAppName(appName))
+
+				if((len(route.Host)) < 1) {
+					newAppRoute, _ := appRepo.FindUrls(rollbackAppName(appName))
+
+					errMapRoutes := appRepo.MapRoutes(venerableAppName(appName), newAppRoute)
+					if (errMapRoutes != nil){
+						fmt.Println("error in apprepo.MapRoutes")
+						return errMapRoutes
+					}
+
+					errUnmapRoutes := appRepo.UnmapRoutes(rollbackAppName(appName), newAppRoute)
+					if (errUnmapRoutes != nil) {
+						fmt.Println("error in apprepo.Unmaproutes")
+						return errUnmapRoutes
+					}
+				}
+				return nil
+			},
+			ReversePrevious: func() error {
+				route, _ := appRepo.FindUrls(rollbackAppName(appName))
+
+				if((len(route.Host)) < 1) {
+					newAppRoute, _ := appRepo.FindUrls(venerableAppName(appName))
+
+					errMapRoutes := appRepo.MapRoutes(rollbackAppName(appName), newAppRoute)
+					if (errMapRoutes != nil) {
+						fmt.Println("Error in appRepo.MapRoutes")
+						return errMapRoutes
+					}
+
+					errUnmapRoutes := appRepo.UnmapRoutes(venerableAppName(appName), newAppRoute)
+					if (errUnmapRoutes != nil) {
+						fmt.Println("Error in appRepo.UnmapRoutes")
+						return errUnmapRoutes
+					}
+				}
+				return nil
+			},
+		},
 		//Rename venerable app
 		{
 			Forward: func() error {
 				return appRepo.RenameApplication(venerableAppName(appName), appName)
 			},
 			ReversePrevious: func() error {
+				appRepo.RenameApplication(venerableAppName(appName), appName)
 				return appRepo.RenameApplication(appName, venerableAppName(appName))
 			},
 		},
@@ -117,12 +172,23 @@ func getActionsForExistingApp(appRepo *ApplicationRepo, appName, manifestPath, a
 				return appRepo.RenameApplication(venerableAppName(appName), appName)
 			},
 		},
-		// delete/stop
+		// delete/unmap
+
 		{
 			Forward: func() error {
 				if(options.KeepExisting){
 					fmt.Println("Stopping old version of app. Remove the --keep-existing-app flag to delete it automatically.")
 					return appRepo.StopApplication(venerableAppName(appName))
+				} else if (options.UnmapRoute){
+					fmt.Println("Unmapping routes for the venerable app. Remove the --unmap-routes flag to delete the old version.")
+					route, err := appRepo.FindUrls(venerableAppName(appName))
+
+					if(err != nil) {
+						fmt.Errorf("Error finding Urls")
+					}
+
+					fmt.Println("Unmapping old version of the app.")
+					return appRepo.UnmapRoutes(venerableAppName(appName), route)
 				} else {
 					fmt.Println("Deleting old version of app. Use the --keep-existing-app flag to preserve it.")
 					return appRepo.DeleteApplication(venerableAppName(appName))
@@ -219,6 +285,7 @@ func ParseArgs(args []string) (string, string, string, AutopilotOptions, error) 
 	manifestPath := flags.String("f", "", "path to an application manifest")
 	appPath := flags.String("p", "", "path to application files")
 	keepVenerable := flags.Bool("keep-existing-app", false, "keep existing app running")
+	unmapVenerableRoutes := flags.Bool("unmap-routes", false, "unmap routes for the venerable app")
 
 	err := flags.Parse(args[2:])
 	if err != nil {
@@ -231,7 +298,7 @@ func ParseArgs(args []string) (string, string, string, AutopilotOptions, error) 
 		return "", "", "", AutopilotOptions{}, ErrNoManifest
 	}
 
-	options := AutopilotOptions{KeepExisting: *keepVenerable}
+	options := AutopilotOptions{KeepExisting: *keepVenerable, UnmapRoute: *unmapVenerableRoutes}
 
 	return appName, *manifestPath, *appPath, options, nil
 }
@@ -244,6 +311,7 @@ type ApplicationRepo struct {
 
 type AutopilotOptions struct {
 	KeepExisting bool
+	UnmapRoute bool
 }
 
 func NewApplicationRepo(conn plugin.CliConnection) *ApplicationRepo {
@@ -278,6 +346,47 @@ func (repo *ApplicationRepo) StartApplication(appName string) error {
 	return err
 }
 
+func (repo *ApplicationRepo) UnmapRoutes(appName string, route Route) error {
+	fmt.Println("Unmapping ", appName, " from ", route.Domain, route.Host)
+	return repo.UnmapRouteFromApp(appName, route)
+}
+
+func (repo *ApplicationRepo) MapRoutes(appName string, route Route) error {
+	return repo.MapRoutesToApp(appName, route)
+}
+
+func (repo *ApplicationRepo) UnmapRouteFromApp(appName string, r Route) error {
+	count := len(r.Host)
+	if (count == 0) {
+		return fmt.Errorf("No routes in the app.")
+	}
+	for i := 0; i<len(r.Host); i++ {
+		repo.conn.CliCommand("unmap-route", appName, r.Domain, "--hostname", r.Host[i])
+		count = count -1
+		if(count == 0) {
+			fmt.Println("Unmapping complete for all routes in %s", appName)
+			return nil
+		}
+	}
+	return fmt.Errorf("Route could not be unmapped")
+}
+
+func (repo *ApplicationRepo) MapRoutesToApp(appName string, r Route) error {
+	count := len(r.Host)
+	if (count == 0) {
+		return fmt.Errorf("There are no routes to add.")
+	}
+	for i := 0; i<len(r.Host); i++ {
+		repo.conn.CliCommand("map-route", appName, r.Domain, "--hostname", r.Host[i])
+		count = count-1
+		if(count == 0) {
+			fmt.Println("Mapping routes to app: ", appName)
+			return nil
+		}
+	}
+	return fmt.Errorf("Error mapping routes to venerable app name")
+}
+
 func (repo *ApplicationRepo) StopApplication(appName string) error {
 	_, err := repo.conn.CliCommand("stop", appName)
 	return err
@@ -286,6 +395,28 @@ func (repo *ApplicationRepo) StopApplication(appName string) error {
 func (repo *ApplicationRepo) ListApplications() error {
 	_, err := repo.conn.CliCommand("apps")
 	return err
+}
+
+func (repo *ApplicationRepo) FindUrls(appName string) (Route, error) {
+	route := Route{nil, "apps.foundry.mrll.com"}
+
+	i, err := repo.conn.GetApp(appName)
+
+	if(err != nil) {
+		return route, err
+	}
+
+	appHosts := i.Routes
+
+	if(appHosts == nil) {
+		return route, fmt.Errorf("No routes for this app.")
+	}
+
+	for _, element := range appHosts {
+		route.Host = append(route.Host, element.Host)
+	}
+
+	return route, nil
 }
 
 func (repo *ApplicationRepo) DoesAppExist(appName string) (bool, error) {
